@@ -1,0 +1,14 @@
+{
+  "schema_version": "1",
+  "conversation_id": "clinic-webhook-invalid-001",
+  "started_at": "2026-10-14T15:00:00+03:00",
+  "ended_at": "2026-10-14T15:01:00+03:00",
+  "language": "en",
+  "agent_prompt_version": "clinic-reception-v1",
+  "policy_version": "demo-clinic-v1",
+  "turns": [
+    {"id":"T1","role":"customer","text":"Do you have any slots?","timestamp":"2026-10-14T15:00:10+03:00"},
+    {"id":"T1","role":"agent","text":"I can check.","timestamp":"2026-10-14T15:00:20+03:00"}
+  ],
+  "tool_events": []
+}

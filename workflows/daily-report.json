@@ -1,0 +1,273 @@
+{
+  "name": "Clinic QA — Daily Report",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list",
+          "cachedResultName": "clinic_qa_results"
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        224,
+        -80
+      ],
+      "id": "3e60356c-5ca1-408a-b592-1781f3c40138",
+      "name": "Get QA Results"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list",
+          "cachedResultName": "clinic_qa_processing_errors"
+        },
+        "filters": {
+          "conditions": []
+        },
+        "returnAll": true
+      },
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1.1,
+      "position": [
+        224,
+        80
+      ],
+      "id": "ddeab918-7d74-44b3-aab4-f94f39119fcf",
+      "name": "Get Intake Errors",
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        448,
+        0
+      ],
+      "id": "a604370f-dbeb-4052-8238-0b13bd04a52a",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "operation": "createFromText",
+        "content": "={{ $('Build Daily Report').first().json.markdown }}",
+        "name": "={{ $('Build Daily Report').first().json.file_name }}",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list",
+          "cachedResultName": "Clinic QA Reports POC"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        1136,
+        128
+      ],
+      "id": "0f357c05-5577-453a-801b-191cfb18e975",
+      "name": "Create file from text"
+    },
+    {
+      "parameters": {
+        "jsCode": "// n8n Code node after \"Get QA Results\" and \"Get Intake Errors\".\n// Run Once for All Items. a YYYY-MM-DD preview date only for manual backfills.\nconst PREVIEW_DATE = '';\nconst TIMEZONE = 'Asia/Riyadh';\n\nfunction localDate(value) {\n  const date = value instanceof Date ? value : new Date(value);\n  if (Number.isNaN(date.getTime())) return null;\n  const parts = Object.fromEntries(new Intl.DateTimeFormat('en-US', {\n    timeZone: TIMEZONE, year: 'numeric', month: '2-digit', day: '2-digit'\n  }).formatToParts(date).map(part => [part.type, part.value]));\n  return `${parts.year}-${parts.month}-${parts.day}`;\n}\n\nfunction previousLocalDate() {\n  const today = localDate(new Date());\n  const date = new Date(today + 'T12:00:00Z');\n  date.setUTCDate(date.getUTCDate() - 1);\n  return date.toISOString().slice(0, 10);\n}\n\nfunction oneLine(value) {\n  return String(value || '').replace(/\\s+/g, ' ').replace(/\\|/g, '\\\\|').trim();\n}\n\nfunction rowsFrom(nodeName) {\n  return $(nodeName).all().map(item => item.json).filter(row =>\n    row && typeof row === 'object' && Object.keys(row).length > 0);\n}\n\nconst reportDate = PREVIEW_DATE || previousLocalDate();\nif (!/^\\d{4}-\\d{2}-\\d{2}$/.test(reportDate)) throw new Error('Invalid report date.');\nconst qaRows = rowsFrom('Get QA Results').filter(row =>\n  row.conversation_id && localDate(row.evaluated_at) === reportDate);\nconst errorRows = rowsFrom('Get Intake Errors').filter(row =>\n  localDate(row.received_at) === reportDate);\n\n// Count each conversation once even if an old evaluator version remains in the table.\nconst latestByConversation = new Map();\nfor (const row of qaRows) {\n  const previous = latestByConversation.get(row.conversation_id);\n  if (!previous || Date.parse(row.evaluated_at) > Date.parse(previous.evaluated_at)) {\n    latestByConversation.set(row.conversation_id, row);\n  }\n}\nconst evaluations = [...latestByConversation.values()];\nconst counts = {\n  evaluated_calls: evaluations.length,\n  validated: 0,\n  needs_review: 0,\n  supported: 0,\n  contradicted: 0,\n  insufficient_evidence: 0,\n  intake_errors: errorRows.length\n};\nconst categories = new Map();\nconst recommendations = new Map();\nconst reviewIds = [];\n\nfor (const row of evaluations) {\n  let parsed;\n  try { parsed = JSON.parse(row.result_json); }\n  catch { parsed = null; }\n  const qa = parsed && typeof parsed === 'object' ? (parsed.qa || parsed) : null;\n  if (row.status !== 'validated' || !qa ||\n      !['supported', 'contradicted', 'insufficient_evidence'].includes(row.verdict)) {\n    counts.needs_review++;\n    reviewIds.push(row.conversation_id);\n    continue;\n  }\n  counts.validated++;\n  counts[row.verdict]++;\n  if (row.verdict === 'supported') continue;\n  for (const finding of Array.isArray(qa.findings) ? qa.findings : []) {\n    const category = oneLine(finding.category) || 'uncategorized';\n    if (!categories.has(category)) categories.set(category, new Set());\n    categories.get(category).add(row.conversation_id);\n  }\n  const recommendation = oneLine(qa.recommended_prompt_change);\n  if (recommendation && recommendation !== 'No prompt change needed.') {\n    if (!recommendations.has(recommendation)) recommendations.set(recommendation, new Set());\n    recommendations.get(recommendation).add(row.conversation_id);\n  }\n}\n\nconst lines = [\n  `# Clinic QA report — ${reportDate}`,\n  '',\n  `Generated: ${new Date().toISOString()} · Reporting timezone: ${TIMEZONE}`,\n  'Day assignment uses the QA evaluation time and intake-error receipt time.',\n  '',\n  '## Counts',\n  '',\n  '| Metric | Count |',\n  '| --- | ---: |',\n  `| Unique evaluated calls | ${counts.evaluated_calls} |`,\n  `| Validated evaluations | ${counts.validated} |`,\n  `| Supported | ${counts.supported} |`,\n  `| Contradicted | ${counts.contradicted} |`,\n  `| Insufficient evidence | ${counts.insufficient_evidence} |`,\n  `| Evaluations needing review | ${counts.needs_review} |`,\n  `| Rejected intake submissions | ${counts.intake_errors} |`,\n  '',\n  '## Finding categories',\n  ''\n];\nif (!categories.size) lines.push('None in validated problem evaluations.');\nelse for (const [category, ids] of [...categories].sort((a, b) => b[1].size - a[1].size)) {\n  lines.push(`- **${category}**: ${ids.size} call(s) — ${[...ids].sort().join(', ')}`);\n}\nlines.push('', '## Proposed prompt changes', '');\nif (!recommendations.size) lines.push('No prompt changes proposed from validated findings.');\nelse for (const [recommendation, ids] of recommendations) {\n  lines.push(`- ${recommendation} (from ${[...ids].sort().join(', ')})`);\n}\nlines.push('', '## Processing and review queue', '');\nlines.push(`- Evaluations needing review: ${reviewIds.length ? reviewIds.sort().join(', ') : 'none'}`);\nlines.push(`- Rejected intake submissions: ${errorRows.length ? errorRows.map(row =>\n  `${oneLine(row.conversation_id) || 'unknown ID'} (${oneLine(row.error_code) || 'unknown error'})`).join(', ') : 'none'}`);\nlines.push('', 'Recommendations are drafts for human review; this workflow does not edit the agent prompt.');\n\nreturn [{json:{\n  report_date: reportDate,\n  file_name: `clinic-qa-${reportDate}.md`,\n  generated_at: new Date().toISOString(),\n  counts,\n  markdown: lines.join('\\n') + '\\n'\n}}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        608,
+        0
+      ],
+      "id": "f1bf9f58-70ce-459a-bb56-6d72e4d7c917",
+      "name": "Build Daily Report"
+    },
+    {
+      "parameters": {
+        "resource": "fileFolder",
+        "searchMethod": "query",
+        "queryString": "={{ \"name = '\" + $('Build Daily Report').first().json.file_name + \"' and trashed = false\" }}",
+        "limit": 1,
+        "filter": {
+          "folderId": {
+            "__rl": true,
+            "value": "",
+            "mode": "list",
+            "cachedResultName": "Clinic QA Reports POC"
+          },
+          "whatToSearch": "files"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        784,
+        0
+      ],
+      "id": "8373dcaf-2d34-4397-abe6-4482c8a97287",
+      "name": "Search files and folders"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "d6f76561-98b5-484d-9c16-080fbb415f44",
+              "leftValue": "={{ $json.id || \"\" }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        976,
+        0
+      ],
+      "id": "32da3382-573e-4dae-980a-28005cf6ac6a",
+      "name": "If"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 12,
+              "triggerAtMinute": 15
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        0
+      ],
+      "id": "1f608292-a79a-47cc-8327-cae3f18a3e28",
+      "name": "Schedule Trigger"
+    }
+  ],
+  "connections": {
+    "Get Intake Errors": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Get QA Results": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Build Daily Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Daily Report": {
+      "main": [
+        [
+          {
+            "node": "Search files and folders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search files and folders": {
+      "main": [
+        [
+          {
+            "node": "If",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Create file from text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get QA Results",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Intake Errors",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "timeSavedMode": "fixed",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  }
+}
